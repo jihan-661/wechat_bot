@@ -2,9 +2,9 @@ import asyncio
 import json
 import sys
 import getopt
-from bot import ai,wechat_bot
+from bot import wechat_bot
 from log import logger  # 导入全局单例日志实例
-
+from database import database
 # 全局配置对象：所有下级业务模块导入此变量使用
 config: dict = {}
 
@@ -55,19 +55,12 @@ def main():
 
     # ========== 启动核心业务 ==========
     logger.info("配置加载完成，服务启动中...")
-    # 此处调用你的核心服务启动逻辑
-
-    #注册Ai实例
-    logger.info("初始化AI服务")
-    ai_client = ai.AiClient(api_key=config["ai"]["api_key"],base_url=config["ai"]["base_url"],model=config["ai"]["model"])
-    #初始化bot服务
+    logger.info("初始化数据库")
+    db = database.Database(**config["database"])
     logger.info("初始化bot客户端")
-    bot_client = wechat_bot.Bot(ai_client)
-    #启动bot
+    bot_client = wechat_bot.Bot(db)
     logger.info("正在启动bot")
     asyncio.run(bot_client.start())
-    logger.info("初始化完成")
-
 
 
 if __name__ == "__main__":
