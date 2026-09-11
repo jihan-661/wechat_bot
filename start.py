@@ -5,6 +5,7 @@ import getopt
 from bot import wechat_bot
 from log import logger  # 导入全局单例日志实例
 from database import database
+from user import user_init
 # 全局配置对象：所有下级业务模块导入此变量使用
 config: dict = {}
 
@@ -57,10 +58,21 @@ def main():
     logger.info("配置加载完成，服务启动中...")
     logger.info("初始化数据库")
     db = database.Database(**config["database"])
-    logger.info("初始化bot客户端")
-    bot_client = wechat_bot.Bot(db)
-    logger.info("正在启动bot")
-    asyncio.run(bot_client.start())
+    logger.info("初始化bot管理类")
+    bot_manager = wechat_bot.BotManager(db)
+    logger.info("正在从数据库恢复所有bot实例")
+    bot_manager.load_from_db()
+    # logger.info("初始化bot客户端")
+    # bot_client = wechat_bot.Bot(db)
+    # logger.info("初始化用户引导")
+    # init_user = user_init.InitUser(db,bot_client.bot)
+    #加载中间件
+    # logger.info("加载中间件")
+    # bot_client.register_handler("before_reply",init_user.user_init)
+    # bot_client.register_handler("before_reply",bot_client.get_ai)
+
+    logger.info("初始化完成")
+    # asyncio.run(bot_client.start())
 
 
 if __name__ == "__main__":

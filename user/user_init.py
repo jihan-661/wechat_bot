@@ -1,3 +1,6 @@
+import wechatbot.types
+import openai
+import log
 from database import database
 
 
@@ -39,34 +42,61 @@ class InitUser:
             return False
 
         # 新用户，启动配置流程
-        self._user_steps[user_id] = {
-            "index": 0,
-            "config": {}
-        }
+        self._user_steps[user_id] = {"config": {}}
         await self.bot.reply(msg, f"请输入{self.CONFIG_FIELDS[0]}")
         return True
 
     async def _collect_config(self, msg) -> bool:
         """收集一条配置输入"""
         user_id = msg.user_id
-        step = self._user_steps[user_id]
-        index = step["index"]
-        config = step["config"]
+        config = self._user_steps[user_id]["config"]
 
-        # 把用户输入存到当前字段
-        field = self.CONFIG_FIELDS[index]
-        config[field] = msg.text
-        index += 1
+        # 找到第一个空字段，把msg.text存进去
+        for field in self.CONFIG_FIELDS:
+            if field not in config:
+                config[field] = msg.text
+                break
 
-        # 还有下一个字段，继续提示
-        if index < len(self.CONFIG_FIELDS):
-            step["index"] = index
-            await self.bot.reply(msg, f"请输入{self.CONFIG_FIELDS[index]}")
+        # 检查是否还有空字段
+        for field in self.CONFIG_FIELDS:
+            if field not in config:
+                await self.bot.reply(msg, f"请输入{field}")
+                return True
+
+        # 全部填完，验证配置
+        invalid_fields = await self._validate_config(config)
+        if invalid_fields:
+            for field in invalid_fields:
+                del config[field]
+            await self.bot.reply(msg, f"验证失败，请重新输入{self.CONFIG_FIELDS[0]}")
             return True
 
-        # 全部填完，写入数据库
+        # 验证通过，写入数据库
         self.db.insert("user", {"id": user_id})
         self.db.insert("user_config", {"user_id": user_id, **config})
         del self._user_steps[user_id]
         await self.bot.reply(msg, "配置完成！欢迎使用WeChatBot")
         return True
+
+    async def _validate_config(self, config: dict) -> list[str]:
+        """验证配置，返回有问题的字段列表，空列表表示全部通过"""
+        invalid = []
+        try:
+            client = openai.Client(api_key=config["api_key"], base_url=config["base_url"])
+            client.models.list()
+        except Exception:
+            invalid.extend(["api_key", "base_url"])
+        return invalid
+
+    #中间件
+    async def user_init(self,parm_dict: dict):
+        """
+        此函数为前置中间件,请将此函数注册到before_stage事件列表中,负责校验数据中是否存在此用户并进行初始化引导
+        注:若无此中间件无法正常使用LLM功能,用户注册功能,对话管理功能等
+        :param parm_dict:参数字典
+        :return: None
+        """
+        log.logger.info("调用user_init中间件")
+        if await self.handle(parm_dict["msg"]):
+            return
+

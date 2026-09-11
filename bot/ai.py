@@ -15,7 +15,7 @@ from log import logger
 
 
 class AiClient:
-    def __init__(self,api_key,base_url,model):
+    def __init__(self,api_key,base_url,model,prompt = None):
         #创建ai客户端
         self.model = model
         self.api_key = api_key
@@ -23,6 +23,9 @@ class AiClient:
         self.ai_client = OpenAI(api_key=self.api_key,base_url=self.base_url)
         #初始化全局记忆列表
         self.message = []
+        #如果有提示词,初始化提示词
+        if prompt:
+            self.add_message(role="system",content=prompt)
 
     def link_ai(self) -> ChatCompletion:
         """

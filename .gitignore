@@ -1,1 +1,16 @@
+# 敏感配置
 .env.json
+
+# 虚拟环境
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# 本地临时凭证（登录测试产物）
+strict_test_*.json
+*.credentials.json
