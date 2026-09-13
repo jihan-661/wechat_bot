@@ -146,8 +146,12 @@ class BotManager:
 
 
     def _apply_middleware(self, bot: Bot):
+        # 默认中间件：InitUser 用户引导（无条件注入，不依赖 _middleware 是否为空）
+        self.register_init_user(bot)
+        # AI 载入中间件：绑定方法，加载用户 AI 配置
+        bot.register_handler("before_reply", bot.get_ai)
+        # 自定义中间件
         for stage, handler in self._middleware:
-            self.register_init_user(bot)
             bot.register_handler(stage, handler)
     def _apply_one_middleware(self,bot:Bot,stage,middleware):
         bot.register_handler(stage,middleware)
@@ -204,8 +208,9 @@ class BotManager:
         return creds.user_id
 
     def register_bot_api(self) -> Bot:
-        """非阻塞注册：创建 Bot，后台跑登录，立即返回实例"""
+        """非阻塞注册：创建 Bot，注入中间件，后台跑登录，立即返回实例"""
         bot = Bot(self.db)
+        self._apply_middleware(bot)
         self._tasks.append(asyncio.run_coroutine_threadsafe(self._login_and_start(bot), self._loop))
         return bot
 
