@@ -24,7 +24,8 @@ class InitUser:
 
     def is_in_database(self, user_id: str) -> bool:
         """查询用户是否已注册"""
-        return bool(self.db.select("user", where="id=%s", params=(user_id,)))
+        return bool(self.db.select("user", where="id=%s", params=(user_id,))
+                    and self.db.select("user_config",where="user_id=%s",params=(user_id,)))
 
     async def handle(self, msg) -> bool:
         """
@@ -43,7 +44,7 @@ class InitUser:
 
         # 新用户，启动配置流程
         self._user_steps[user_id] = {"config": {}}
-        await self.bot.reply(msg, f"请输入{self.CONFIG_FIELDS[0]}")
+        await self.bot.bot.reply(msg, f"请输入{self.CONFIG_FIELDS[0]}")
         return True
 
     async def _collect_config(self, msg) -> bool:
@@ -60,7 +61,7 @@ class InitUser:
         # 检查是否还有空字段
         for field in self.CONFIG_FIELDS:
             if field not in config:
-                await self.bot.reply(msg, f"请输入{field}")
+                await self.bot.bot.reply(msg, f"请输入{field}")
                 return True
 
         # 全部填完，验证配置
@@ -68,14 +69,15 @@ class InitUser:
         if invalid_fields:
             for field in invalid_fields:
                 del config[field]
-            await self.bot.reply(msg, f"验证失败，请重新输入{self.CONFIG_FIELDS[0]}")
+            await self.bot.bot.reply(msg, f"验证失败，请重新输入{self.CONFIG_FIELDS[0]}")
             return True
 
         # 验证通过，写入数据库
-        self.db.insert("user", {"id": user_id})
+        if not self.db.select("user",where="id=%s",params=(user_id,)):
+            self.db.insert("user", {"id": user_id})
         self.db.insert("user_config", {"user_id": user_id, **config})
         del self._user_steps[user_id]
-        await self.bot.reply(msg, "配置完成！欢迎使用WeChatBot")
+        await self.bot.bot.reply(msg, "配置完成！欢迎使用WeChatBot")
         return True
 
     async def _validate_config(self, config: dict) -> list[str]:
