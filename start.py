@@ -61,7 +61,7 @@ def main():
     logger.debug("初始化bot管理类")
     bot_manager = wechat_bot.BotManager(db)
     logger.debug("正在从数据库恢复所有bot实例")
-    asyncio.run(bot_manager.load_from_db())
+    bot_manager.load_from_db()
     # logger.info("初始化bot客户端")
     # bot_client = wechat_bot.Bot(db)
     # logger.info("初始化用户引导")

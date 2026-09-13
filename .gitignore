@@ -14,3 +14,6 @@ __pycache__/
 # 本地临时凭证（登录测试产物）
 strict_test_*.json
 *.credentials.json
+
+# 用户登录凭证目录
+user/user_token/

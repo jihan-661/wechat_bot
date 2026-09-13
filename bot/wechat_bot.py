@@ -1,8 +1,10 @@
 import asyncio
 import threading
 import os
+from pathlib import Path
 
 from wechatbot import WeChatBot
+from wechatbot.auth import save_credentials
 from database.database import Database
 from . import ai
 from user.user_init import InitUser
@@ -10,11 +12,13 @@ from log import logger
 from user import user_init
 import flask
 
-BASE_DIR = os.path.abspath(__file__)
-USER_DIR = os.path.join(BASE_DIR,"../","user","user_token")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # bot/ 目录
+USER_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "user", "user_token"))
+
+
 class Bot:
-    def __init__(self, db: Database,cred_path = None):
-        self.bot = WeChatBot(on_qr_url=self.get_qr_url,cred_path=cred_path)
+    def __init__(self, db: Database, cred_path=None):
+        self.bot = WeChatBot(on_qr_url=self.get_qr_url, cred_path=cred_path)
         self.db = db
         #唯一标识符号,不自己管理,由BotManage统一在外部注入
 
@@ -32,7 +36,9 @@ class Bot:
         }
         self.ai_client = None
         self.qr_url = None
-    def get_qr_url(self,url:str):
+        self.user_id = None  # 由 BotManager 注入（恢复时来自 user 表，注册时来自 creds）
+
+    def get_qr_url(self, url: str):
         self.qr_url = url
 
     def register_handler(self, stage: str, handler):
@@ -122,8 +128,12 @@ class BotManager:
         BotManager._initialized = True
         self._bots: dict[str, Bot] = {}
         self.db = db
-        self._tasks: list[asyncio.Task] = []  # 防 GC
+        self._tasks: list = []  # 防 GC（run_coroutine_threadsafe 返回的 Future）
         self._middleware = []
+        # 常驻后台事件循环：load_from_db / register_bot_api 提交的协程都在这里跑，
+        # 不会因 start.py 的 asyncio.run 返回而销毁
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, daemon=True).start()
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -146,71 +156,71 @@ class BotManager:
         init_user = user_init.InitUser(self.db, bot)
         self._apply_one_middleware(bot, "before_reply", init_user)
 
-    def get_bot(self, bot_id: str) -> Bot | None:
-        return self._bots.get(bot_id)
+    def get_bot(self, user_id: str) -> Bot | None:
+        return self._bots.get(user_id)
 
-    def add_bot(self, bot_id: str, bot: Bot,):
-        self._apply_middleware(bot)
+    def add_bot(self, user_id: str, bot: Bot,):
         """加入管理并启动"""
-        self._bots[bot_id] = bot
-        # 后台启动，不阻塞
-        asyncio.create_task(bot.start())
+        self._apply_middleware(bot)
+        self._bots[user_id] = bot
+        # 提交到常驻事件循环后台启动，不阻塞
+        self._tasks.append(asyncio.run_coroutine_threadsafe(bot.start(), self._loop))
 
-    def del_bot(self, bot_id: str):
-        bot = self._bots.pop(bot_id, None)
+    def del_bot(self, user_id: str):
+        bot = self._bots.pop(user_id, None)
         if bot:
             bot.bot.stop()
 
-    async def load_from_db(self):
-        """启动时从数据库恢复所有 bot"""
+    def load_from_db(self):
+        """启动时从数据库恢复所有已注册用户（status=1）的 bot"""
         rows = self.db.select("user", where="status=1")
+        logger.info(f"恢复bot：user(status=1) 共 {len(rows)} 个用户")
         for row in rows:
             user_id = row["id"]
-            try:
-                user_path = os.path.join(USER_DIR,f"{user_id}.?")
-                with open(user_path,"r") as f:
-                    bot = Bot(self.db,cred_path=user_path)
-            except FileNotFoundError as e:
-                bot = Bot(self.db)
-            # bot.bot_id = bot_id
-            # self._bots[bot_id] = bot
+            user_path = os.path.join(USER_DIR, f"{user_id}.json")
+            if not os.path.exists(user_path):
+                logger.warning(f"用户 {user_id} 无凭证文件，跳过启动（待扫码注册）")
+                continue
+            bot = Bot(self.db, cred_path=user_path)
+            bot.user_id = user_id
+            self._bots[user_id] = bot
             self._apply_middleware(bot)
-            self._tasks.append(asyncio.create_task(bot.start()))
+            self._tasks.append(asyncio.run_coroutine_threadsafe(bot.start(), self._loop))
+            logger.info(f"已恢复用户 {user_id} 的 bot")
 
     async def add_new_bot(self) -> str:
         """交互式添加：扫码登录 → 存数据库 → 启动"""
         bot = Bot(self.db)
-        wechat_bot = bot.bot
-        creds = await wechat_bot.login()  # 弹二维码，等扫码
-        bot.bot_id = creds.account_id
-        # 存数据库（已存在则忽略）
-        #我们没有bot表,数据库已经回退了,需要存的是用户id如果用户不存在的话
-        # self.db.insert("bot", {"name": bot.bot_id})
-        if not self.db.select("user",["id"]):
-            self.db.insert("user",{
-                "id": creds.user_id
-            })
-        self._bots[bot.bot_id] = bot
-        await asyncio.create_task(wechat_bot.start())
-        return bot.bot_id
-    def register_bot_api(self):
-        """非阻塞注册：创建 Bot，后台线程跑登录，立即返回实例"""
+        creds = await bot.bot.login()  # 弹二维码，等扫码
+        bot.user_id = creds.user_id
+        # 凭证归档到用户目录（供下次启动恢复）
+        os.makedirs(USER_DIR, exist_ok=True)
+        await save_credentials(creds, Path(os.path.join(USER_DIR, f"{creds.user_id}.json")))
+        # 幂等写 user
+        if not self.db.select_one("user", where="id=%s", params=(creds.user_id,)):
+            self.db.insert("user", {"id": creds.user_id})
+        self._bots[creds.user_id] = bot
+        await bot.bot.start()
+        return creds.user_id
+
+    def register_bot_api(self) -> Bot:
+        """非阻塞注册：创建 Bot，后台跑登录，立即返回实例"""
         bot = Bot(self.db)
-        threading.Thread(
-            target=lambda: asyncio.run(self._login_and_start(bot)),
-            daemon=True,
-        ).start()
+        self._tasks.append(asyncio.run_coroutine_threadsafe(self._login_and_start(bot), self._loop))
         return bot
 
     async def _login_and_start(self, bot: Bot):
         try:
             creds = await bot.bot.login()  # ① 回调填充 bot.qr_url → 接口轮询到就返回
             # ② confirmed 后 creds.user_id 就绪
+            # 凭证归档到用户目录（供下次启动恢复）
+            os.makedirs(USER_DIR, exist_ok=True)
+            await save_credentials(creds, Path(os.path.join(USER_DIR, f"{creds.user_id}.json")))
             # 幂等写 user（这是最早能拿到 user_id 的点）
             if not self.db.select_one("user", where="id=%s", params=(creds.user_id,)):
                 self.db.insert("user", {"id": creds.user_id})
-            bot.bot_id = creds.account_id
-            self._bots[bot.bot_id] = bot  # 注册进管理器，消息才会被处理
+            bot.user_id = creds.user_id
+            self._bots[creds.user_id] = bot  # 注册进管理器，消息才会被处理
             await bot.bot.start()  # 长轮询，永不返回
         except Exception as e:
             logger.error(f"登录/启动 bot 失败: {e}")
@@ -226,5 +236,3 @@ class BotRoute:
 
     def rm_bot(self,bot_id):
         ...
-
-
