@@ -6,6 +6,7 @@ from bot import wechat_bot
 from log import logger  # 导入全局单例日志实例
 from database import database
 from user import user_init
+import app
 # 全局配置对象：所有下级业务模块导入此变量使用
 config: dict = {}
 
@@ -62,6 +63,9 @@ def main():
     bot_manager = wechat_bot.BotManager(db)
     logger.debug("正在从数据库恢复所有bot实例")
     bot_manager.load_from_db()
+    logger.debug("启动路由")
+    router = app.Route(bot_manager)
+    app.app.run(**config["app"])
     # logger.info("初始化bot客户端")
     # bot_client = wechat_bot.Bot(db)
     # logger.info("初始化用户引导")

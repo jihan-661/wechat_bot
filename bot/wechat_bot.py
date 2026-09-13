@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from wechatbot import WeChatBot
-from wechatbot.auth import save_credentials
+from wechatbot.auth import save_credentials, clear_credentials
 from database.database import Database
 from . import ai
 from user.user_init import InitUser
@@ -100,6 +100,8 @@ class Bot:
         # 正常聊天
         logger.info(f"用户ID: {msg.user_id}")
         logger.info(f"接收到信息:{msg.text}")
+        if not parm_dict.get("ai_client"):
+            return
         ai_res = parm_dict["ai_client"].get_ai_res("user", content=msg.text)
         #向参数字典新增ai回复
         parm_dict["ai_res"] = ai_res
@@ -158,7 +160,7 @@ class BotManager:
 
     def register_init_user(self,bot:Bot):
         init_user = user_init.InitUser(self.db, bot)
-        self._apply_one_middleware(bot, "before_reply", init_user)
+        self._apply_one_middleware(bot, "before_reply", init_user.user_init)
 
     def get_bot(self, user_id: str) -> Bot | None:
         return self._bots.get(user_id)
@@ -216,15 +218,21 @@ class BotManager:
 
     async def _login_and_start(self, bot: Bot):
         try:
-            creds = await bot.bot.login()  # ① 回调填充 bot.qr_url → 接口轮询到就返回
+            # force=True：强制走二维码流程（否则默认路径残留凭证会让 login 直接返回 stored，qr_url 不填充）
+            creds = await bot.bot.login(force=True)  # ① 回调填充 bot.qr_url → 接口轮询到就返回
             # ② confirmed 后 creds.user_id 就绪
-            # 凭证归档到用户目录（供下次启动恢复）
+            # 凭证归档到用户目录（供下次启动恢复），并清掉默认路径残留防止凭证串用
             os.makedirs(USER_DIR, exist_ok=True)
             await save_credentials(creds, Path(os.path.join(USER_DIR, f"{creds.user_id}.json")))
+            await clear_credentials()
             # 幂等写 user（这是最早能拿到 user_id 的点）
             if not self.db.select_one("user", where="id=%s", params=(creds.user_id,)):
                 self.db.insert("user", {"id": creds.user_id})
             bot.user_id = creds.user_id
+            # 去重：同一用户已有 Bot 实例则停掉旧的，防止一条消息触发多个 on_message
+            old = self._bots.get(creds.user_id)
+            if old:
+                old.bot.stop()
             self._bots[creds.user_id] = bot  # 注册进管理器，消息才会被处理
             await bot.bot.start()  # 长轮询，永不返回
         except Exception as e:
