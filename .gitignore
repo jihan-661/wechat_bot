@@ -16,4 +16,4 @@ strict_test_*.json
 *.credentials.json
 
 # 用户登录凭证目录
-user/user_token/
+/user/user_token/*
