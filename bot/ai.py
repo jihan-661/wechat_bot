@@ -27,6 +27,7 @@ class AiClient:
         if prompt:
             self.add_message(role="system",content=prompt)
 
+
     def link_ai(self) -> ChatCompletion:
         """
 

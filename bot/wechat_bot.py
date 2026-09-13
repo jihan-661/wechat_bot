@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import os
 
 from wechatbot import WeChatBot
 from database.database import Database
@@ -8,9 +10,11 @@ from log import logger
 from user import user_init
 import flask
 
+BASE_DIR = os.path.abspath(__file__)
+USER_DIR = os.path.join(BASE_DIR,"../","user","user_token")
 class Bot:
-    def __init__(self, db: Database):
-        self.bot = WeChatBot()
+    def __init__(self, db: Database,cred_path = None):
+        self.bot = WeChatBot(on_qr_url=self.get_qr_url,cred_path=cred_path)
         self.db = db
         #唯一标识符号,不自己管理,由BotManage统一在外部注入
 
@@ -27,7 +31,9 @@ class Bot:
             "after_reply": [],  # AI回复后：对话记录、输出限制
         }
         self.ai_client = None
-
+        self.qr_url = None
+    def get_qr_url(self,url:str):
+        self.qr_url = url
 
     def register_handler(self, stage: str, handler):
         try:
@@ -107,11 +113,22 @@ class Bot:
 
 
 class BotManager:
+    _instance = None
+    _initialized = False
     def __init__(self, db: Database):
+        #防止重复初始化
+        if BotManager._initialized:
+            return
+        BotManager._initialized = True
         self._bots: dict[str, Bot] = {}
         self.db = db
         self._tasks: list[asyncio.Task] = []  # 防 GC
         self._middleware = []
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def register_handler(self, stage: str, handler):
         """注册默认中间件，所有 bot 都会加载"""
@@ -146,12 +163,17 @@ class BotManager:
 
     async def load_from_db(self):
         """启动时从数据库恢复所有 bot"""
-        rows = self.db.select("bot", where="status=1")
+        rows = self.db.select("user", where="status=1")
         for row in rows:
-            bot_id = row["name"]
-            bot = Bot(self.db)
-            bot.bot_id = bot_id
-            self._bots[bot_id] = bot
+            user_id = row["id"]
+            try:
+                user_path = os.path.join(USER_DIR,f"{user_id}.?")
+                with open(user_path,"r") as f:
+                    bot = Bot(self.db,cred_path=user_path)
+            except FileNotFoundError as e:
+                bot = Bot(self.db)
+            # bot.bot_id = bot_id
+            # self._bots[bot_id] = bot
             self._apply_middleware(bot)
             self._tasks.append(asyncio.create_task(bot.start()))
 
@@ -172,9 +194,27 @@ class BotManager:
         await asyncio.create_task(wechat_bot.start())
         return bot.bot_id
     def register_bot_api(self):
+        """非阻塞注册：创建 Bot，后台线程跑登录，立即返回实例"""
         bot = Bot(self.db)
-        wechat_bot = bot.bot
-        return bot.bot.get_credentials()
+        threading.Thread(
+            target=lambda: asyncio.run(self._login_and_start(bot)),
+            daemon=True,
+        ).start()
+        return bot
+
+    async def _login_and_start(self, bot: Bot):
+        try:
+            creds = await bot.bot.login()  # ① 回调填充 bot.qr_url → 接口轮询到就返回
+            # ② confirmed 后 creds.user_id 就绪
+            # 幂等写 user（这是最早能拿到 user_id 的点）
+            if not self.db.select_one("user", where="id=%s", params=(creds.user_id,)):
+                self.db.insert("user", {"id": creds.user_id})
+            bot.bot_id = creds.account_id
+            self._bots[bot.bot_id] = bot  # 注册进管理器，消息才会被处理
+            await bot.bot.start()  # 长轮询，永不返回
+        except Exception as e:
+            logger.error(f"登录/启动 bot 失败: {e}")
+
 
 class BotRoute:
     def __init__(self):
