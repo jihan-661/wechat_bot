@@ -7,6 +7,8 @@ from wechatbot import WeChatBot
 from wechatbot.auth import save_credentials, clear_credentials
 from database.database import Database
 from . import ai
+from .command.command_manager import CommandManager, CommandMiddleware
+from .command.examples import register_defaults
 from user.user_init import InitUser
 from log import logger
 from user import user_init
@@ -69,6 +71,24 @@ class Bot:
         )
         self._ai_clients[user_id] = client
         return client
+
+    def refresh_ai(self, user_id: str) -> bool:
+        """从数据库重新加载用户配置，覆盖 AiClient 缓存。返回是否成功"""
+        config = self.db.select_one("user_config", where="user_id=%s", params=(user_id,))
+        if not config:
+            self._ai_clients.pop(user_id, None)
+            logger.info(f"刷新AI配置失败：用户 {user_id} 无配置")
+            return False
+        client = ai.AiClient(
+            api_key=config["api_key"],
+            base_url=config["base_url"],
+            model=config["model"],
+            prompt=config.get("prompt", None)
+        )
+        self._ai_clients[user_id] = client
+        logger.info(f"已刷新用户 {user_id} 的 AI 配置")
+        return True
+
     async def get_ai(self,parm_dict):
         """
         前置中间件,如果不载入此中间件LLM无法正常工作
@@ -96,6 +116,14 @@ class Bot:
 
         for i in self._handlers["before_reply"]:
             await i(parm_dict)
+            if parm_dict.get("handled"):
+                break
+
+        # 命令中间件命中：直接回复，不走 AI
+        if parm_dict.get("reply"):
+            logger.info(f"命令回复: {parm_dict['reply']}")
+            await self.bot.reply(msg, parm_dict["reply"])
+            return
 
         # 正常聊天
         logger.info(f"用户ID: {msg.user_id}")
@@ -104,7 +132,12 @@ class Bot:
             await self.bot.reply(msg,"未配置ai")
             logger.debug("ai_client为空")
             return
-        ai_res = parm_dict["ai_client"].get_ai_res("user", content=msg.text)
+        try:
+            ai_res = parm_dict["ai_client"].get_ai_res("user", content=msg.text)
+        except Exception as e:
+            logger.error(f"AI 调用失败: {e}")
+            await self.bot.reply(msg, "AI 服务调用失败，请检查配置（/user config）")
+            return
         #向参数字典新增ai回复
         parm_dict["ai_res"] = ai_res
         #修改角色
@@ -134,6 +167,9 @@ class BotManager:
         self.db = db
         self._tasks: list = []  # 防 GC（run_coroutine_threadsafe 返回的 Future）
         self._middleware = []
+        # 命令系统：单例管理器 + 注册 demo 命令组
+        self.cmd_manager = CommandManager()
+        register_defaults(self.cmd_manager)
         # 常驻后台事件循环：load_from_db / register_bot_api 提交的协程都在这里跑，
         # 不会因 start.py 的 asyncio.run 返回而销毁
         self._loop = asyncio.new_event_loop()
@@ -152,6 +188,8 @@ class BotManager:
     def _apply_middleware(self, bot: Bot):
         # 默认中间件：InitUser 用户引导（无条件注入，不依赖 _middleware 是否为空）
         self.register_init_user(bot)
+        # 命令中间件：命中命令则短路（优先级高于 AI）
+        bot.register_handler("before_reply", CommandMiddleware(self.cmd_manager.get_command_session, bot))
         # AI 载入中间件：绑定方法，加载用户 AI 配置
         bot.register_handler("before_reply", bot.get_ai)
         # 自定义中间件

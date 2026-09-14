@@ -61,5 +61,9 @@ class AiClient:
         """
         self.add_message(role, content)
         ai_handle = self.link_ai()
-        return ai_handle.choices[0].message.content
+        res = ai_handle.choices[0].message.content
+        # 关键：AI 回复写回历史，否则多轮对话里 AI 看不到自己之前说过什么
+        self.add_message("assistant", res)
+        logger.debug(f"message上下文列表: type={type(self.message).__name__} len={len(self.message)} 内容={self.message}")
+        return res
 
