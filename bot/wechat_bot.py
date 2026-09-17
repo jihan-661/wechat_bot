@@ -110,7 +110,7 @@ class Bot:
     async def on_message(self, msg):
         #状态驱动的now_role变量,为中间件提供服务,在回复前是用户,回复中是ai,触发工具中间件时由工具中间件内部手动修改为tool
         now_role = "user"
-        parm_dict = {"msg": msg,"now_role":now_role}
+        parm_dict = {"msg": msg,"now_role":now_role,"now_content":msg.text}
         user_id = msg.user_id
 
         #预留字段,将来开发
@@ -130,7 +130,7 @@ class Bot:
         # 正常聊天
         logger.info(f"用户ID: {msg.user_id}")
         logger.info(f"接收到信息:{msg.text}")
-        parm_dict["now_content"] = msg.text
+
         if not parm_dict.get("ai_client"):
             await self.bot.reply(msg,"未配置ai")
             logger.debug("ai_client为空")
@@ -190,13 +190,16 @@ class BotManager:
 
 
     def _apply_middleware(self, bot: Bot):
+        memory_manager =  memory_manage.Memory_Manage(self.db).write_memory
         # 默认中间件：InitUser 用户引导（无条件注入，不依赖 _middleware 是否为空）
         self.register_init_user(bot)
         # 命令中间件：命中命令则短路（优先级高于 AI）
         bot.register_handler("before_reply", CommandMiddleware(self.cmd_manager.get_command_session, bot))
         # AI 载入中间件：绑定方法，加载用户 AI 配置
         bot.register_handler("before_reply", bot.get_ai)
-        bot.register_handler("on_reply",memory_manage.Memory_Manage(self.db).write_memory)
+        bot.register_handler("before_reply",memory_manager)
+        bot.register_handler("on_reply",memory_manager)
+
         # 自定义中间件
         for stage, handler in self._middleware:
             bot.register_handler(stage, handler)
