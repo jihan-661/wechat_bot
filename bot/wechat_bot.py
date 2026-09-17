@@ -128,6 +128,7 @@ class Bot:
         # 正常聊天
         logger.info(f"用户ID: {msg.user_id}")
         logger.info(f"接收到信息:{msg.text}")
+        parm_dict["now_content"] = msg.text
         if not parm_dict.get("ai_client"):
             await self.bot.reply(msg,"未配置ai")
             logger.debug("ai_client为空")
@@ -139,6 +140,7 @@ class Bot:
             await self.bot.reply(msg, "AI 服务调用失败，请检查配置（/user config）")
             return
         #向参数字典新增ai回复
+        parm_dict["now_content"] = ai_res
         parm_dict["ai_res"] = ai_res
         #修改角色
         parm_dict["now_role"] = "assistant"
