@@ -10,9 +10,11 @@ from . import ai
 from .command.command_manager import CommandManager, CommandMiddleware
 from .command.examples import register_defaults
 from user.user_init import InitUser
-from log import logger
 from user import user_init
+from log import logger
+from .memory import memory_manage
 import flask
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # bot/ 目录
 USER_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "user", "user_token"))
@@ -194,6 +196,7 @@ class BotManager:
         bot.register_handler("before_reply", CommandMiddleware(self.cmd_manager.get_command_session, bot))
         # AI 载入中间件：绑定方法，加载用户 AI 配置
         bot.register_handler("before_reply", bot.get_ai)
+        bot.register_handler("on_reply",memory_manage.Memory_Manage(self.db).write_memory)
         # 自定义中间件
         for stage, handler in self._middleware:
             bot.register_handler(stage, handler)
