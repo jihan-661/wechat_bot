@@ -7,7 +7,7 @@ CREATE TABLE `chat_history` (
   `session_id` VARCHAR(64) NOT NULL COMMENT '会话ID',
   `role` VARCHAR(32) NOT NULL COMMENT 'user / assistant',
   `content` TEXT NOT NULL COMMENT '消息内容',
-  `timestamp` DATETIME NOT NULL COMMENT '消息时间',
+  `timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '消息时间，入库自动生成',
   `status` TINYINT NOT NULL DEFAULT 1 COMMENT '1有效，0逻辑删除',
   PRIMARY KEY (`id`),
   INDEX `idx_uid_sid` (`user_id`, `session_id`),
