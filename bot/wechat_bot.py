@@ -135,9 +135,16 @@ class Bot:
             logger.debug("ai_client为空")
             return
         try:
+            # ⚠️ 必须保持同步调用，不要改成 asyncio.to_thread / async。
+            # 单 Bot 内 AI 调用需要串行：AiClient.message 是按调用顺序追加的，
+            # 一旦并发执行就会出现 user/user/assistant/assistant 这类畸形上下文
+            # （将来接入工具调用后更严重），而畸形上下文可能被服务端拒绝，
+            # 直接导致整个服务不可用。
             ai_res = parm_dict["ai_client"].get_ai_res("user", content=msg.text)
-        except Exception as e:
-            logger.error(f"AI 调用失败: {e}")
+        except Exception:
+            # 用 logger.exception 保留完整 traceback：只打 str(e) 会丢掉出错位置，
+            # 无法区分问题出在本地代码还是 SDK 内部。
+            logger.exception("AI 调用失败")
             await self.bot.reply(msg, "AI 服务调用失败，请检查配置（/user config）")
             return
         #向参数字典新增ai回复

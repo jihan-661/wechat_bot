@@ -20,7 +20,16 @@ class AiClient:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
-        self.ai_client = OpenAI(api_key=self.api_key,base_url=self.base_url)
+        # 默认 timeout 为 connect=5s / read=600s 且 max_retries=2。本项目要求
+        # AI 调用保持同步串行（见 wechat_bot.on_message 中的说明），所以网络
+        # 一旦挂起，整条消息处理链会被长时间阻塞。显式收紧超时，让故障在
+        # 30 秒内以异常形式暴露，而不是卡十几分钟。
+        self.ai_client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=30.0,
+            max_retries=1,
+        )
         #初始化全局记忆列表
         self.message = []
         #如果有提示词,初始化提示词
