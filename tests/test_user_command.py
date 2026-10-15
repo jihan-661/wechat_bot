@@ -80,6 +80,13 @@ class TestUserCommand(unittest.TestCase):
         self.assertIn("已更新 model", reply)
         self.assertEqual(bot.db.updated[0][1], {"model": "gpt-4o"})
 
+    def test_quoted_value_is_stored_without_quotes(self):
+        """带引号的写法应与不带引号等价（parse_args 剥离成对引号）。"""
+        bot = FakeBot(db=FakeDB(existing=True))
+        reply = self.call('/user config -set prompt -value "你是助手"', bot)
+        self.assertIn("已更新 prompt", reply)
+        self.assertEqual(bot.db.updated[0][1], {"prompt": "你是助手"})
+
     # ---------- 参数校验 ----------
 
     def test_disallowed_key(self):

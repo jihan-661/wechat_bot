@@ -29,6 +29,30 @@ class TestParseArgs(unittest.TestCase):
             ({"set": "prompt", "value": "你是 一个AI"}, []),
         )
 
+    # ---------- 引号处理 ----------
+
+    def test_quoted_value_is_unquoted(self):
+        # /user config -set prompt -value "你是助手" 不应把引号存进值里
+        self.assertEqual(parse_args(["-value", '"你是助手"']), ({"value": "你是助手"}, []))
+
+    def test_single_quoted_value_is_unquoted(self):
+        self.assertEqual(parse_args(["-value", "'你是助手'"]), ({"value": "你是助手"}, []))
+
+    def test_quoted_value_spanning_tokens(self):
+        # 引号跨 token：合并之后才配对，应正确剥离
+        self.assertEqual(parse_args(["-value", '"你', '是"']), ({"value": "你 是"}, []))
+
+    def test_unpaired_quote_is_kept(self):
+        # 不成对的引号原样保留，避免截断普通内容
+        self.assertEqual(parse_args(["-value", '"abc']), ({"value": '"abc'}, []))
+        self.assertEqual(parse_args(["-value", 'abc"']), ({"value": 'abc"'}, []))
+
+    def test_mismatched_quotes_are_kept(self):
+        self.assertEqual(parse_args(["-value", "\"abc'"]), ({"value": "\"abc'"}, []))
+
+    def test_quoted_positional_is_unquoted(self):
+        self.assertEqual(parse_args(['"config"']), ({}, ["config"]))
+
     def test_boolean_switch(self):
         self.assertEqual(parse_args(["-v"]), ({"v": ""}, []))
 

@@ -74,16 +74,33 @@ def _is_option(token: str) -> bool:
     return True
 
 
+def _strip_quotes(text: str) -> str:
+    """剥离首尾成对的引号（"..." 或 \'...\'）。
+
+    只处理"整段被同一个引号包裹"的情况（首尾引号字符相同且长度 >= 2）。
+    像 '"abc'、'abc"' 这种不成对的原样返回，避免把普通内容截断。
+    """
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    return text
+
+
 def parse_args(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
     """解析命令参数。
 
     -key value 或 --key value 解析为选项（opts），键统一去掉前导横线；
     其余为位置参数（pos）。选项的值会一直收集到下一个选项或末尾（支持长值、可含空格）。
 
-    例: ['-set', 'a', 'x']         -> ({'set': 'a'}, ['x'])
-    例: ['--set', 'prompt', '你是'] -> ({'set': 'prompt'}, ['你是'])
-    例: ['-1']                     -> ({}, ['-1'])       # 负数当位置参数
-    例: ['-v']                     -> ({'v': ''}, [])    # 布尔开关
+    引号处理：选项值与位置参数若被成对引号整段包裹，会剥离引号。
+    因此 `-value "你是助手"` 与 `-value 你是助手` 等价；引号跨 token 时
+    （如 `-value "你 是"`）也能在合并之后正确配对剥离。
+
+    例: ['-set', 'a', 'x']          -> ({'set': 'a x'}, [])       # 长值语义
+    例: ['--set', 'prompt', '你是']  -> ({'set': 'prompt'}, ['你是'])
+    例: ['-value', '"你是助手"']     -> ({'value': '你是助手'}, [])
+    例: ['-value', '"你', '是"']     -> ({'value': '你 是'}, [])
+    例: ['-1']                      -> ({}, ['-1'])              # 负数当位置参数
+    例: ['-v']                      -> ({'v': ''}, [])           # 布尔开关
     """
     opts: dict[str, str] = {}
     pos: list[str] = []
@@ -98,10 +115,11 @@ def parse_args(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
             while j < n and not _is_option(tokens[j]):
                 vals.append(tokens[j])
                 j += 1
-            opts[key] = " ".join(vals)
+            # 先合并再剥离，这样跨 token 的引号（"你 是"）也能配对
+            opts[key] = _strip_quotes(" ".join(vals))
             i = j
         else:
-            pos.append(token)
+            pos.append(_strip_quotes(token))
             i += 1
     return opts, pos
 
