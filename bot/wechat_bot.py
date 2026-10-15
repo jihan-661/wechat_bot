@@ -8,7 +8,6 @@ from wechatbot.auth import save_credentials, clear_credentials
 from database.database import Database
 from . import ai
 from .command.command_manager import CommandManager, CommandMiddleware
-from .command.examples import register_defaults
 from user.user_init import InitUser
 from user import user_init
 from log import logger
@@ -171,9 +170,10 @@ class BotManager:
         self.db = db
         self._tasks: list = []  # 防 GC（run_coroutine_threadsafe 返回的 Future）
         self._middleware = []
-        # 命令系统：单例管理器 + 注册 demo 命令组
+        # 命令系统：自动发现 bot/command/commands/ 下的全部命令组
         self.cmd_manager = CommandManager()
-        register_defaults(self.cmd_manager)
+        discovered = self.cmd_manager.discover()
+        logger.info(f"命令系统就绪，已加载命令组: {discovered}")
         # 常驻后台事件循环：load_from_db / register_bot_api 提交的协程都在这里跑，
         # 不会因 start.py 的 asyncio.run 返回而销毁
         self._loop = asyncio.new_event_loop()

@@ -5,8 +5,10 @@
 - /user update config                  从数据库重新加载配置，覆盖当前 AiClient
 
 只开放用户自己的配置（api_key/base_url/model/prompt），不暴露系统状态。
+
+本模块通过顶层 GROUPS 列表向 CommandManager.discover() 声明要注册的组。
 """
-from .base_command import CommandGroup, command
+from ..base_command import CommandGroup, command
 
 # 允许用户修改的配置键（白名单，user_id 不可改）
 ALLOWED_KEYS = ("api_key", "base_url", "model", "prompt")
@@ -23,12 +25,12 @@ class UserCommand(CommandGroup):
     name = "user"
     desc = "用户设置"
 
-    @command("user config -set <键> -value <值>   修改自己的AI配置（api_key/base_url/model/prompt）")
-    async def config(self, session, opts, pos):
-        key = (opts.get("set") or "").strip()
-        value = (opts.get("value") or "").strip()
+    @command("config -set <键> -value <值>", help="修改自己的AI配置（api_key/base_url/model/prompt）")
+    async def config(self, ctx):
+        key = (ctx.args.get("set") or "").strip()
+        value = (ctx.args.get("value") or "").strip()
         if not key:
-            key = (pos[0] if pos else "").strip()
+            key = (ctx.pos[0] if ctx.pos else "").strip()
         if not key or not value:
             return "用法: /user config -set <键> -value <值>\n可选键: api_key / base_url / model / prompt"
         if key not in ALLOWED_KEYS:
@@ -41,30 +43,28 @@ class UserCommand(CommandGroup):
         if key == "base_url" and not (value.startswith("http://") or value.startswith("https://")):
             return "base_url 必须以 http:// 或 https:// 开头"
 
-        bot = session.bot
+        bot = ctx.bot
         if bot is None:
             return "命令执行上下文缺失（bot 未注入），请稍后重试"
         # upsert：已有记录则更新，否则插入
-        if bot.db.select_one("user_config", where="user_id=%s", params=(session.user_id,)):
-            bot.db.update("user_config", {key: value}, "user_id=%s", (session.user_id,))
+        if bot.db.select_one("user_config", where="user_id=%s", params=(ctx.user_id,)):
+            bot.db.update("user_config", {key: value}, "user_id=%s", (ctx.user_id,))
         else:
-            bot.db.insert("user_config", {"user_id": session.user_id, key: value})
+            bot.db.insert("user_config", {"user_id": ctx.user_id, key: value})
         # 改完自动刷新 AI 配置
-        bot.refresh_ai(session.user_id)
+        bot.refresh_ai(ctx.user_id)
         return f"已更新 {key}，配置已生效"
 
-    @command("user update config   从数据库重新加载配置")
-    async def update(self, session, opts, pos):
-        if not pos or pos[0] != "config":
+    @command("update config", help="从数据库重新加载配置")
+    async def update(self, ctx):
+        if not ctx.pos or ctx.pos[0] != "config":
             return "用法: /user update config"
-        bot = session.bot
+        bot = ctx.bot
         if bot is None:
             return "命令执行上下文缺失（bot 未注入），请稍后重试"
-        if not bot.refresh_ai(session.user_id):
+        if not bot.refresh_ai(ctx.user_id):
             return "未找到用户配置，请先设置: /user config -set api_key -value <值>"
         return "配置已从数据库重新加载，当前对话生效"
 
 
-def register_defaults(manager) -> None:
-    """注册全部命令组到管理器"""
-    manager.register_group(UserCommand())
+GROUPS = [UserCommand]
