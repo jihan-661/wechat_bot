@@ -8,7 +8,6 @@ from wechatbot.auth import save_credentials, clear_credentials
 from database.database import Database
 from . import ai
 from .command.command_manager import CommandManager, CommandMiddleware
-from .command.examples import register_defaults
 from user.user_init import InitUser
 from user import user_init
 from log import logger
@@ -136,9 +135,16 @@ class Bot:
             logger.debug("ai_client为空")
             return
         try:
+            # ⚠️ 必须保持同步调用，不要改成 asyncio.to_thread / async。
+            # 单 Bot 内 AI 调用需要串行：AiClient.message 是按调用顺序追加的，
+            # 一旦并发执行就会出现 user/user/assistant/assistant 这类畸形上下文
+            # （将来接入工具调用后更严重），而畸形上下文可能被服务端拒绝，
+            # 直接导致整个服务不可用。
             ai_res = parm_dict["ai_client"].get_ai_res("user", content=msg.text)
-        except Exception as e:
-            logger.error(f"AI 调用失败: {e}")
+        except Exception:
+            # 用 logger.exception 保留完整 traceback：只打 str(e) 会丢掉出错位置，
+            # 无法区分问题出在本地代码还是 SDK 内部。
+            logger.exception("AI 调用失败")
             await self.bot.reply(msg, "AI 服务调用失败，请检查配置（/user config）")
             return
         #向参数字典新增ai回复
@@ -171,9 +177,10 @@ class BotManager:
         self.db = db
         self._tasks: list = []  # 防 GC（run_coroutine_threadsafe 返回的 Future）
         self._middleware = []
-        # 命令系统：单例管理器 + 注册 demo 命令组
+        # 命令系统：自动发现 bot/command/commands/ 下的全部命令组
         self.cmd_manager = CommandManager()
-        register_defaults(self.cmd_manager)
+        discovered = self.cmd_manager.discover()
+        logger.info(f"命令系统就绪，已加载命令组: {discovered}")
         # 常驻后台事件循环：load_from_db / register_bot_api 提交的协程都在这里跑，
         # 不会因 start.py 的 asyncio.run 返回而销毁
         self._loop = asyncio.new_event_loop()

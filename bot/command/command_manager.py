@@ -1,46 +1,69 @@
-"""命令管理器与命令会话。
+"""命令管理器、命令会话与命令中间件。
 
 架构：
-- CommandManager（单例）：注册命令组、管理 per-user 会话
-- CommandSession（每用户一个）：路由消息、/help 特殊处理、多轮状态预留
-- CommandMiddleware：接入微信 bot 的 before_reply 中间件，命中命令则短路 AI
+- CommandManager：注册命令组、自动发现 commands 包、管理 per-user 会话
+- CommandSession：每个用户一个，负责路由消息、生成 /help、调用命令
+- CommandMiddleware：接入 bot 的 before_reply 阶段，命中命令则短路 AI
 
-命令语义（重要）：
-- 仅以 "/" 开头的消息视为命令（/help、/system status、/system config ...）
-- 无 "/" 前缀的消息一律放行给 AI（普通聊天）
+命令语义：
+- 仅以 "/" 开头的消息视为命令
+- 无 "/" 前缀的消息一律放行给 AI（返回 None）
 - "/" 开头但无法解析 → 返回帮助/提示，绝不透传 AI
+
+扩展方式：
+- 在 bot/command/commands/ 下新建模块，暴露 GROUPS = [YourGroup]
+- 不需要修改本文件，也不需要任何手工登记（discover 自动扫描）
 """
+import importlib
+import inspect
+import pkgutil
+
 from log import logger
-from .base_command import CommandGroup, parse_args
+from .base_command import CommandContext, CommandGroup, parse_args
 
 
 class CommandManager:
-    """全局唯一的命令管理类：注册命令组 + 管理会话表。"""
+    """命令组注册表 + per-user 会话表。
 
-    _instance = None
-    _initialized = False
+    非单例：由调用方（BotManager）创建并持有，便于测试时造独立实例。
+    """
 
     def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-        self.groups: dict[str, CommandGroup] = {}          # 组名 -> 命令组实例
-        self.sessions: dict[str, CommandSession] = {}      # user_id -> 会话
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+        self.groups: dict[str, CommandGroup] = {}
+        self.sessions: dict[str, "CommandSession"] = {}
 
     def register_group(self, group: CommandGroup):
         """注册命令组（重复注册直接报错，防止静默覆盖）"""
+        if not isinstance(group, CommandGroup):
+            raise TypeError(f"只能注册 CommandGroup 实例，收到 {type(group).__name__}")
         if group.name in self.groups:
             raise ValueError(f"命令组 {group.name} 已注册")
         self.groups[group.name] = group
 
-    def register_command(self, group: CommandGroup):
-        """兼容旧命名：注册命令组"""
-        self.register_group(group)
+    def discover(self, package=None) -> list[str]:
+        """自动发现并注册 commands 包下的所有命令组。
+
+        约定：每个命令模块在顶层暴露 GROUPS 列表（元素为 CommandGroup 子类）。
+        跳过以 "_" 开头的模块。
+
+        :param package: 要扫描的包，默认 bot.command.commands
+        :return: 本次实际注册的组名列表（按模块名排序）
+        """
+        if package is None:
+            from . import commands
+            package = commands
+
+        registered: list[str] = []
+        for mod_info in pkgutil.iter_modules(package.__path__):
+            if mod_info.name.startswith("_"):
+                continue
+            module = importlib.import_module(f"{package.__name__}.{mod_info.name}")
+            for group_cls in getattr(module, "GROUPS", []):
+                group = group_cls()
+                self.register_group(group)
+                registered.append(group.name)
+                logger.info(f"已注册命令组 /{group.name}（来自 {mod_info.name}.py）")
+        return registered
 
     def get_command_session(self, user_id: str) -> "CommandSession":
         """获取用户会话：存在返回，不存在创建（多轮状态靠它持久）"""
@@ -54,23 +77,21 @@ class CommandSession:
 
     def __init__(self, user_id: str, groups: dict[str, CommandGroup]):
         self.user_id = user_id
-        self.groups = groups                 # 引用全局命令表（命令对象共享、无状态）
-        self.command = None                  # 预留：当前进行中的多轮命令
-        self.state = None                    # 预留：状态机当前值
-        self.bot = None                      # 由 CommandMiddleware 每次调用前注入（命令刷新配置用）
+        self.groups = groups          # 引用全局命令表（命令对象共享、无状态）
+        self.bot = None               # 由 CommandMiddleware 每次调用前注入
+        self.db = None                # 同上（取自 bot.db）
 
     async def handle(self, msg) -> str | None:
         """统一处理入口。返回回复文本；返回 None 表示这不是命令，交给 AI。"""
         text = (msg.text or "").strip()
-        if not text:
-            return None
-        # 仅 "/" 开头视为命令；无前缀一律放行 AI
-        if not text.startswith("/"):
+        # 非 "/" 开头一律放行给 AI
+        if not text or not text.startswith("/"):
             return None
 
-        body = text[1:].strip()              # 去掉前导 "/"
-        if not body:                         # 单独一个 "/" → 给帮助，拦截
+        body = text[1:].strip()               # 去掉前导 "/"
+        if not body:                          # 单独一个 "/" → 给帮助，拦截
             return self._manager_help()
+
         tokens = body.split()
         head = tokens[0]
 
@@ -79,11 +100,10 @@ class CommandSession:
             return self._manager_help(tokens[1] if len(tokens) > 1 else "")
 
         group = self.groups.get(head)
-        if not group:                        # /xxx 未知命令 → 拦截并提示
+        if not group:                         # /xxx 未知命令 → 拦截并提示
             return f"未知命令: /{head}\n" + self._manager_help()
-
-        if len(tokens) < 2:
-            return self._manager_help(head)  # 只输组名 → 返回该组帮助
+        if len(tokens) < 2:                   # 只输组名 → 返回该组帮助
+            return self._manager_help(head)
 
         method_name = tokens[1]
         fn = getattr(group, method_name, None)
@@ -91,22 +111,50 @@ class CommandSession:
             return f"未知命令: /{head} {method_name}\n" + self._manager_help(head)
 
         opts, pos = parse_args(tokens[2:])
-        result = await fn(self, opts, pos)
+        ctx = CommandContext(
+            user_id=self.user_id,
+            args=opts,
+            pos=pos,
+            bot=self.bot,
+            db=self.db,
+            msg=msg,
+            session=self,
+        )
+
+        # 命令内部异常不能让整条消息处理链崩掉：兜底记录并返回提示
+        try:
+            result = fn(ctx)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            logger.exception(f"命令 /{head} {method_name} 执行失败")
+            return "命令执行出错，已记录日志（请查看日志定位）"
+
+        # 返回 None 表示该命令不产出回复，交给后续流程 / AI
+        if result is None:
+            return None
         return result if isinstance(result, str) else str(result)
 
     def _manager_help(self, group_name: str = "") -> str:
         """用本会话持有的 groups 引用生成帮助文本（groups 即全局注册表）"""
         if group_name:
-            g = self.groups.get(group_name)
-            if not g:
+            group = self.groups.get(group_name)
+            if not group:
                 return f"未知命令组: {group_name}"
-            title = f"【{g.name}】{g.desc}".rstrip()
-            body = [f"  /{g.name} {m}  {u}" for m, u in g.collect_commands().items()]
-            return "\n".join([title] + body)
+            title = f"【{group.name}】{group.desc}".rstrip()
+            usages = group.collect_commands()
+            helps = group.collect_help()
+            lines = [title]
+            for method, usage in usages.items():
+                desc = helps.get(method, "")
+                suffix = f"    {desc}" if desc else ""
+                lines.append(f"  /{group.name} {usage}{suffix}")
+            return "\n".join(lines)
+
         lines = ["可用命令："]
-        for g in self.groups.values():
-            title = f"【{g.name}】{g.desc}".rstrip()
-            names = "、".join(g.collect_commands().keys())
+        for group in self.groups.values():
+            title = f"【{group.name}】{group.desc}".rstrip()
+            names = "、".join(group.collect_commands().keys())
             lines.append(f"{title}  [{names}]")
         lines.append("输入 '/help <组名>' 查看单组详细用法")
         return "\n".join(lines)
@@ -115,7 +163,7 @@ class CommandSession:
 class CommandMiddleware:
     """AI 回复前的命令中间件。
 
-    命中命令 → 设置 parm_dict["reply"] + ["handled"]，on_message 据此短路 AI。
+    命中命令 → 设置 parm_dict["reply"] + ["handled"]，on_message 据此短路 AI；
     未命中（非 "/" 开头）→ 不改动 parm_dict，消息正常走 AI。
     """
 
@@ -127,7 +175,9 @@ class CommandMiddleware:
         msg = parm_dict["msg"]
         user_id = msg.user_id
         session = self.get_session(user_id)
-        session.bot = self.bot                # 注入当前 bot 到会话
+        # 注入当前 bot 与数据库句柄，命令通过 ctx.bot / ctx.db 使用
+        session.bot = self.bot
+        session.db = getattr(self.bot, "db", None)
         reply = await session.handle(msg)
         if reply:
             logger.info(f"命令命中: user={user_id} 输入={msg.text!r} 回复={reply[:60]!r}")
